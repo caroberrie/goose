@@ -374,118 +374,121 @@ pub const Connection = struct {
         try self.sendMessage(core.Message.new(reply_h, encoder.body()));
     }
 
-    /// Runs the main loop, blocking and handling messages for the registered objects.
-    pub fn waitOnHandle(self: *Connection, handle: usize) !void {
-        if (handle >= self.registered_interfaces.items.len) return error.InvalidHandle;
+    fn dispatchMethodCall(self: *Connection, msg: *core.Message) !void {
+        if (msg.header.message_type != .MethodCall) return;
 
-        while (true) {
-            var msg = try self.waitMessage();
-            defer self.freeMessage(&msg);
+        var iface: ?[]const u8 = null;
+        var path: ?[]const u8 = null;
+        var member: ?[]const u8 = null;
+        for (msg.header.header_fields) |f| {
+            if (f.code == .Interface) iface = f.value.Interface;
+            if (f.code == .Path) path = f.value.Path;
+            if (f.code == .Member) member = f.value.Member;
+        }
 
-            if (msg.header.message_type == .MethodCall) {
-                // Check interface and path
-                var iface: ?[]const u8 = null;
-                var path: ?[]const u8 = null;
-                var member: ?[]const u8 = null;
-                for (msg.header.header_fields) |f| {
-                    if (f.code == .Interface) iface = f.value.Interface;
-                    if (f.code == .Path) path = f.value.Path;
-                    if (f.code == .Member) member = f.value.Member;
-                }
+        const p = path orelse return;
+        var handled = false;
 
-                if (path) |p| {
-                    var handled = false;
-                    for (self.registered_interfaces.items) |*w| {
-                        // Check path first
-                        if (std.mem.eql(u8, w.path, p)) {
-                            // Then check interface or Introspectable
-                            if (iface) |i| {
-                                if (std.mem.eql(u8, w.interface_name, i) or
-                                    std.mem.eql(u8, i, "org.freedesktop.DBus.Introspectable") or
-                                    std.mem.eql(u8, i, "org.freedesktop.DBus.Properties"))
-                                {
-                                    // Dispatch
-                                    try w.dispatch(w, self, msg);
-                                    handled = true;
-                                }
-                            } else {
-                                // Fallback dispatch
-                                try w.dispatch(w, self, msg);
-                                handled = true;
-                            }
-                        }
+        for (self.registered_interfaces.items) |*w| {
+            if (std.mem.eql(u8, w.path, p)) {
+                if (iface) |i| {
+                    if (std.mem.eql(u8, w.interface_name, i) or
+                        std.mem.eql(u8, i, "org.freedesktop.DBus.Introspectable") or
+                        std.mem.eql(u8, i, "org.freedesktop.DBus.Properties"))
+                    {
+                        try w.dispatch(w, self, msg.*);
+                        handled = true;
                     }
-
-                    // Dynamic Introspection logic
-                    if (!handled) {
-                        if (member) |m| {
-                            if (std.mem.eql(u8, m, "Introspect") and (iface == null or std.mem.eql(u8, iface.?, "org.freedesktop.DBus.Introspectable"))) {
-                                // Check for children
-                                var children_xml = try std.ArrayList(u8).initCapacity(self.__allocator, 256);
-                                defer children_xml.deinit(self.__allocator);
-
-                                // We need a set to avoid duplicates
-                                var seen_children = std.StringHashMap(void).init(self.__allocator);
-                                defer seen_children.deinit();
-
-                                for (self.registered_interfaces.items) |*w| {
-                                    if (std.mem.startsWith(u8, w.path, p)) {
-                                        if (w.path.len > p.len) {
-                                            var child_name: []const u8 = "";
-                                            if (std.mem.eql(u8, p, "/")) {
-                                                // Special case root
-                                                if (w.path.len > 1) {
-                                                    const sub = w.path[1..];
-                                                    if (std.mem.indexOfScalar(u8, sub, '/')) |idx| {
-                                                        child_name = sub[0..idx];
-                                                    } else {
-                                                        child_name = sub;
-                                                    }
-                                                }
-                                            } else {
-                                                // Check if w.path[p.len] == '/'
-                                                if (w.path[p.len] == '/') {
-                                                    const sub = w.path[p.len + 1 ..];
-                                                    if (std.mem.indexOfScalar(u8, sub, '/')) |idx| {
-                                                        child_name = sub[0..idx];
-                                                    } else {
-                                                        child_name = sub;
-                                                    }
-                                                }
-                                            }
-
-                                            if (child_name.len > 0) {
-                                                if (seen_children.get(child_name) == null) {
-                                                    try seen_children.put(child_name, {});
-                                                    try children_xml.print(self.__allocator, "  <node name=\"{s}\"/>\n", .{child_name});
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Construct full XML
-                                var full_xml = try std.ArrayList(u8).initCapacity(self.__allocator, 1024);
-                                defer full_xml.deinit(self.__allocator);
-                                try full_xml.appendSlice(self.__allocator, "<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object Introspection 1.0//EN\"");
-                                try full_xml.appendSlice(self.__allocator, " \"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd\">\n");
-                                try full_xml.appendSlice(self.__allocator, "<node>\n");
-                                try full_xml.appendSlice(self.__allocator, children_xml.items);
-                                try full_xml.appendSlice(self.__allocator, "</node>\n");
-
-                                // Send Reply
-                                const xml_slice = try full_xml.toOwnedSliceSentinel(self.__allocator, 0);
-                                defer self.__allocator.free(xml_slice);
-
-                                var encoder = try message.BodyEncoder.encode(self.__allocator, GStr.new(xml_slice));
-                                defer encoder.deinit();
-                                try self.sendReply(msg, encoder);
-                            }
-                        }
-                    }
+                } else {
+                    try w.dispatch(w, self, msg.*);
+                    handled = true;
                 }
             }
         }
+
+        if (!handled) {
+            if (member) |m| {
+                if (std.mem.eql(u8, m, "Introspect") and
+                    (iface == null or std.mem.eql(u8, iface.?, "org.freedesktop.DBus.Introspectable")))
+                {
+                    var children_xml = try std.ArrayList(u8).initCapacity(self.__allocator, 256);
+                    defer children_xml.deinit(self.__allocator);
+                    var seen_children = std.StringHashMap(void).init(self.__allocator);
+                    defer seen_children.deinit();
+                    for (self.registered_interfaces.items) |*w| {
+                        if (std.mem.startsWith(u8, w.path, p)) {
+                            if (w.path.len > p.len) {
+                                var child_name: []const u8 = "";
+                                if (std.mem.eql(u8, p, "/")) {
+                                    if (w.path.len > 1) {
+                                        const sub = w.path[1..];
+                                        if (std.mem.indexOfScalar(u8, sub, '/')) |idx| {
+                                            child_name = sub[0..idx];
+                                        } else child_name = sub;
+                                    }
+                                } else {
+                                    if (w.path[p.len] == '/') {
+                                        const sub = w.path[p.len + 1 ..];
+                                        if (std.mem.indexOfScalar(u8, sub, '/')) |idx| {
+                                            child_name = sub[0..idx];
+                                        } else child_name = sub;
+                                    }
+                                }
+                                if (child_name.len > 0 and seen_children.get(child_name) == null) {
+                                    try seen_children.put(child_name, {});
+                                    try children_xml.print(self.__allocator, "  <node name=\"{s}\"/>\n", .{child_name});
+                                }
+                            }
+                        }
+                    }
+                    var full_xml = try std.ArrayList(u8).initCapacity(self.__allocator, 1024);
+                    defer full_xml.deinit(self.__allocator);
+                    try full_xml.appendSlice(self.__allocator, "<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object Introspection 1.0//EN\"");
+                    try full_xml.appendSlice(self.__allocator, " \"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd\">\n");
+                    try full_xml.appendSlice(self.__allocator, "<node>\n");
+                    try full_xml.appendSlice(self.__allocator, children_xml.items);
+                    try full_xml.appendSlice(self.__allocator, "</node>\n");
+                    const xml_slice = try full_xml.toOwnedSliceSentinel(self.__allocator, 0);
+                    defer self.__allocator.free(xml_slice);
+                    var encoder = try message.BodyEncoder.encode(self.__allocator, GStr.new(xml_slice));
+                    defer encoder.deinit();
+                    try self.sendReply(msg.*, encoder);
+                }
+            }
+        }
+    }
+
+    pub fn waitOnHandle(self: *Connection, handle: usize) !void {
+        if (handle >= self.registered_interfaces.items.len) return error.InvalidHandle;
+        while (true) {
+            var msg = try self.waitMessage();
+            defer self.freeMessage(&msg);
+            try self.dispatchMethodCall(&msg);
+        }
+    }
+
+    pub fn tickTimeout(self: *Connection, timeout: std.Io.Timeout) !bool {
+        if (self.__reader.interface.end <= self.__reader.interface.seek) {
+            var peek_buf: [1]u8 = undefined;
+            var im: std.Io.net.IncomingMessage = .init;
+            const result = self.__reader.io.operateTimeout(.{ .net_receive = .{
+                .socket_handle = self.__inner_sock.socket.handle,
+                .message_buffer = (&im)[0..1],
+                .data_buffer = &peek_buf,
+                .flags = .{ .peek = true },
+            } }, timeout) catch |err| switch (err) {
+                error.Timeout => return false,
+                else => return err,
+            };
+            const maybe_err, const count = result.net_receive;
+            if (maybe_err) |_| return false;
+            if (count == 0) return false;
+        }
+
+        var msg = try self.waitMessage();
+        defer self.freeMessage(&msg);
+        try self.dispatchMethodCall(&msg);
+        return true;
     }
 
     /// Registers interest in specific signals or messages using a D-Bus match rule.
