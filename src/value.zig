@@ -167,7 +167,10 @@ pub const GVariant = union(GVariantTag) {
 
     pub fn deinit(self: *GVariant, allocator: std.mem.Allocator) void {
         switch (self.*) {
-            .ufd, .string, .object_path, .signature => |s| allocator.free(s),
+            .string => |g| allocator.free(g.s),
+            .object_path => |g| allocator.free(g.s),
+            .signature => |g| allocator.free(g.s),
+            .ufd => {},
             .array, .tuple => |arr| {
                 for (arr) |*item| item.deinit(allocator);
                 allocator.free(arr);
