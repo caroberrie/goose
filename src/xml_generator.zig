@@ -59,9 +59,11 @@ pub fn generateIntrospectionXml(allocator: std.mem.Allocator, comptime T: type, 
         if (@typeInfo(FieldType) == .@"struct" and @hasDecl(FieldType, "__is_goose_signal")) {
             const PayloadT = FieldType.PayloadType;
             try out.print(allocator, "    <signal name=\"{s}\">\n", .{@field(field, "name")});
-            const sig = try getSignature(allocator, PayloadT);
-            defer allocator.free(sig);
-            try out.print(allocator, "      <arg type=\"{s}\" />\n", .{sig});
+            if (PayloadT != void) {
+                const sig = try getSignature(allocator, PayloadT);
+                defer allocator.free(sig);
+                try out.print(allocator, "      <arg type=\"{s}\" />\n", .{sig});
+            }
             try out.appendSlice(allocator, "    </signal>\n");
         }
     }
