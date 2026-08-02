@@ -786,7 +786,9 @@ pub const Connection = struct {
                 },
                 .MethodCall => {
                     var call_msg = msg;
-                    self.dispatchMethodCall(&call_msg);
+                    self.dispatchMethodCall(&call_msg) catch |e| {
+                        std.debug.print("[goose] dispatch during call failed: {any}\n", .{e});
+                    };
                     self.freeMessage(@constCast(&msg));
                 },
                 else => {
