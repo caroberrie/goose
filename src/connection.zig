@@ -737,67 +737,61 @@ pub const Connection = struct {
     }
 
     fn call(self: *Connection, data: []u8, serial: u32) !core.Message {
-            var writer_buffer: [2048]u8 = undefined;
-            var writer = self.__inner_sock.writer(self.io, &writer_buffer);
-            var io_writer = &writer.interface;
-            try io_writer.writeAll(data);
-            try io_writer.flush();
-            while (true) {
-
-                for (self.pending_messages.items, 0..) |*msg, i| {
-                    if (msg.header.message_type == .MethodReturn or msg.header.message_type == .Error) {
-                        for (msg.header.header_fields) |f| {
-                            if (f.code == .ReplySerial and f.value.ReplySerial == serial) {
-                                const found = self.pending_messages.orderedRemove(i);
-                                return found;
-                            }
-                        }
-                    }
-                }
-
-                const msg = try self.readNextMessage();
-
-
-                var is_reply = false;
+        var writer_buffer: [2048]u8 = undefined;
+        var writer = self.__inner_sock.writer(self.io, &writer_buffer);
+        var io_writer = &writer.interface;
+        try io_writer.writeAll(data);
+        try io_writer.flush();
+        while (true) {
+            for (self.pending_messages.items, 0..) |*msg, i| {
                 if (msg.header.message_type == .MethodReturn or msg.header.message_type == .Error) {
                     for (msg.header.header_fields) |f| {
                         if (f.code == .ReplySerial and f.value.ReplySerial == serial) {
-                            is_reply = true;
-                            break;
+                            const found = self.pending_messages.orderedRemove(i);
+                            return found;
                         }
                     }
                 }
-                if (is_reply) {
-                    return msg;
+            }
+
+            const msg = try self.readNextMessage();
+
+            var is_reply = false;
+            if (msg.header.message_type == .MethodReturn or msg.header.message_type == .Error) {
+                for (msg.header.header_fields) |f| {
+                    if (f.code == .ReplySerial and f.value.ReplySerial == serial) {
+                        is_reply = true;
+                        break;
+                    }
                 }
+            }
+            if (is_reply) {
+                return msg;
+            }
 
-
-                switch (msg.header.message_type) {
-                    .Signal => {
-                        var dispatched = false;
-                        for (self.signal_handlers.items) |handler| {
-                            if (msg.isSignal(handler.interface, handler.member)) {
-                                handler.callback(handler.ctx, msg);
-                                dispatched = true;
-                            }
+            switch (msg.header.message_type) {
+                .Signal => {
+                    var dispatched = false;
+                    for (self.signal_handlers.items) |handler| {
+                        if (msg.isSignal(handler.interface, handler.member)) {
+                            handler.callback(handler.ctx, msg);
+                            dispatched = true;
                         }
-                        if (dispatched) {
-                            self.freeMessage(@constCast(&msg));
-                        } else {
-                            try self.pending_messages.append(self.__allocator, msg);
-                        }
-                    },
-                    .MethodCall => {
-
-                        var call_msg = msg;
-                        self.dispatchMethodCall(&call_msg);
+                    }
+                    if (dispatched) {
                         self.freeMessage(@constCast(&msg));
-                    },
-                    else => {
-
+                    } else {
                         try self.pending_messages.append(self.__allocator, msg);
-                    },
-                }
+                    }
+                },
+                .MethodCall => {
+                    var call_msg = msg;
+                    self.dispatchMethodCall(&call_msg);
+                    self.freeMessage(@constCast(&msg));
+                },
+                else => {
+                    try self.pending_messages.append(self.__allocator, msg);
+                },
             }
         }
     }
