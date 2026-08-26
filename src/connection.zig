@@ -481,8 +481,9 @@ pub const Connection = struct {
                 else => return err,
             };
             const maybe_err, const count = result.net_receive;
-            if (maybe_err) |_| return false;
-            if (count == 0) return false;
+
+            if (maybe_err) |e| return e;
+            if (count == 0) return error.EndOfStream;
         }
 
         var msg = try self.waitMessage();
